@@ -253,7 +253,9 @@ uint8_t RingEEPROM::initCommon(uint8_t device, const uint8_t *signature,
     _signatureLength = 0;
 
     if (signature == 0 || signatureLength == 0) return ERR_SIGNATURE_INVALID;
-    if ((uint8_t)device > (uint8_t)AT24C64) return ERR_UNKNOWN_DEVICE;
+    if (device != (uint8_t)RING_EEPROM_INTERNAL &&
+        device != (uint8_t)AT24C32 &&
+        device != (uint8_t)AT24C64) return ERR_UNKNOWN_DEVICE;
 
     if (copySignature) {
         if (signatureLength > sizeof(_signatureInline)) return ERR_SIGNATURE_TOO_LONG;
