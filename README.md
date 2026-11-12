@@ -223,3 +223,63 @@ sh tests/host/run.sh
 
 - [Microchip AT24C32/AT24C64 datasheet](https://ww1.microchip.com/downloads/en/DeviceDoc/doc0336.pdf) — ёмкости и протокол I²C; библиотека использует однобайтовую запись с ACK polling, без Page Write.
 - [AVR-LibC: E2END](https://avrdudes.github.io/avr-libc/avr-libc-user-manual/group__avr__io.html) — последний адрес внутренней EEPROM; размер равен E2END + 1.
+
+
+---
+
+## Две независимые реализации
+
+В репозитории доступны две самостоятельные библиотеки с одинаковой логикой кольцевого хранения, но разными физическими способами доступа к EEPROM.
+
+### Побайтная реализация
+
+- Заголовок: `<Ring_EEPROM.h>`
+- Объект: `Ring_EEPROM`
+- Типы памяти: `INTERNAL`, `AT24C32`, `AT24C64`
+- Для AT24 используются отдельные байтовые I²C-операции. Page Write не применяется.
+
+### Блочная реализация
+
+- Заголовок: `<Block_Ring_EEPROM.h>`
+- Объект: `Block_Ring_EEPROM`
+- Типы памяти: `BLOCK_INTERNAL`, `BLOCK_AT24C32`, `BLOCK_AT24C64`
+- Для AT24 используется блочное чтение и запись страницами с учётом границ страниц и ACK polling.
+
+Блочная реализация перенесена из сохранённой ветки `block-io`. В `main` она размещена как отдельный набор исходников: у неё собственные класс, объект, типы, коды ошибок и макросы настроек. Она не использует внутренние символы побайтной библиотеки. Ветка `block-io` оставлена без изменений как исходная контрольная версия.
+
+### Пример блочной реализации
+
+```cpp
+#include <Block_Ring_EEPROM.h>
+
+const uint16_t DATA_SIGNATURE = 0xA35C;
+
+struct MyData {
+    uint8_t mode;
+    uint16_t frequency;
+};
+
+MyData data = {1, 7100000};
+MyData restored = {};
+
+void setup() {
+    uint8_t result = Block_Ring_EEPROM.init(BLOCK_AT24C64, DATA_SIGNATURE);
+    if (result != BLOCK_RING_OK) return;
+
+    result = Block_Ring_EEPROM.write(data);
+    if (result != BLOCK_RING_OK) return;
+
+    result = Block_Ring_EEPROM.read(restored);
+}
+
+void loop() {}
+```
+
+Пример скетча: `examples/Block_Basic/Block_Basic.ino`.
+
+### Раздельные host-тесты
+
+- Побайтная реализация: `sh tests/host/run.sh`.
+- Блочная реализация: `sh tests/block_io/run.sh`.
+
+В `tests/host/combined_api_compile.cpp` проверяется совместное подключение обоих заголовков и отсутствие конфликтов публичного API. Наличие host-тестов не заменяет испытания на реальном оборудовании.

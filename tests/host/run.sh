@@ -42,3 +42,14 @@ CXX=\${CXX:-g++}
   -c "$ROOT/tests/host/api_compile.cpp" -o "$BUILD/api_compile.o"
 
 printf '%s\n' "Ring_EEPROM host tests: OK"
+
+# Compile the independent block-I/O implementation and both public headers together.
+"$CXX" -std=c++11 -Wall -Wextra -Werror \
+  -DARDUINO_ARCH_AVR -DE2END=1023 \
+  -I"$ROOT/tests/host/include" -I"$ROOT/src" \
+  -c "$ROOT/src/Block_Ring_EEPROM.cpp" -o "$BUILD/block_ring_eeprom.o"
+
+"$CXX" -std=c++11 -Wall -Wextra -Werror \
+  -DARDUINO_ARCH_AVR -DE2END=1023 \
+  -I"$ROOT/tests/host/include" -I"$ROOT/src" \
+  -c "$ROOT/tests/host/combined_api_compile.cpp" -o "$BUILD/combined_api_compile.o"
