@@ -4,7 +4,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 BUILD="$ROOT/tests/host/build"
 mkdir -p "$BUILD"
-CXX=\${CXX:-g++}
+CXX=${CXX:-g++}
 
 "$CXX" -std=c++11 -Wall -Wextra -Werror \
   -DARDUINO_ARCH_AVR -DE2END=1023 \
