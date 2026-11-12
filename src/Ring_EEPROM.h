@@ -40,8 +40,8 @@ enum RingEEPROMResult : uint8_t {
 /* Тип памяти, который пользователь выбирает в init(). */
 enum RingEEPROMDevice : uint8_t {
     RING_EEPROM_INTERNAL = 0,
-    AT24C32 = 1,
-    AT24C64 = 2
+    AT24C32 = 0x32,
+    AT24C64 = 0x64
 };
 
 /*
