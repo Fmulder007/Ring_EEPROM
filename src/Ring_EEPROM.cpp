@@ -20,9 +20,6 @@
 #if RING_EEPROM_INLINE_SIGNATURE_MAX < 1
 #error "RING_EEPROM_INLINE_SIGNATURE_MAX must be at least 1"
 #endif
-#if RING_EEPROM_IO_BUFFER_SIZE < 4
-#error "RING_EEPROM_IO_BUFFER_SIZE must be at least 4"
-#endif
 
 RingEEPROM Ring_EEPROM;
 
@@ -138,7 +135,7 @@ static uint8_t softProbe() {
     return ack ? RING_OK : ERR_I2C_NO_RESPONSE;
 }
 
-static uint8_t softReadMemory(uint16_t address, uint8_t *destination, uint16_t length) {
+static uint8_t softReadMemoryByte(uint16_t address, uint8_t &value) {
     if (!softStart()) return ERR_I2C_TIMEOUT;
     if (!softWriteByte((uint8_t)(RING_EEPROM_I2C_ADDRESS << 1)) ||
         !softWriteByte((uint8_t)(address >> 8)) ||
@@ -154,36 +151,31 @@ static uint8_t softReadMemory(uint16_t address, uint8_t *destination, uint16_t l
         softStop();
         return ERR_I2C_NO_RESPONSE;
     }
-    for (uint16_t i = 0; i < length; ++i) {
-        if (!softReadByte(destination[i], i + 1 < length)) {
-            softStop();
-            return ERR_I2C_TIMEOUT;
-        }
+    if (!softReadByte(value, false)) {
+        softStop();
+        return ERR_I2C_TIMEOUT;
     }
     return softStop() ? RING_OK : ERR_I2C_TIMEOUT;
 }
 
-static uint8_t softWriteMemory(uint16_t address, const uint8_t *source, uint16_t length) {
+static uint8_t softWriteMemoryByte(uint16_t address, uint8_t value) {
     if (!softStart()) return ERR_I2C_TIMEOUT;
     if (!softWriteByte((uint8_t)(RING_EEPROM_I2C_ADDRESS << 1)) ||
         !softWriteByte((uint8_t)(address >> 8)) ||
-        !softWriteByte((uint8_t)address)) {
+        !softWriteByte((uint8_t)address) ||
+        !softWriteByte(value)) {
         softStop();
         return ERR_I2C_NO_RESPONSE;
     }
-    for (uint16_t i = 0; i < length; ++i) {
-        if (!softWriteByte(source[i])) {
-            softStop();
-            return ERR_I2C_NO_RESPONSE;
-        }
-    }
     if (!softStop()) return ERR_I2C_TIMEOUT;
 
+    // Одна отдельная процедура ACK polling для каждого записанного байта.
     const uint32_t started = millis();
     for (;;) {
         if (softStart()) {
             const bool ack = softWriteByte((uint8_t)(RING_EEPROM_I2C_ADDRESS << 1));
-            softStop();
+            const bool stopped = softStop();
+            if (!stopped) return ERR_I2C_TIMEOUT;
             if (ack) return RING_OK;
         }
         if ((uint32_t)(millis() - started) >= RING_EEPROM_I2C_TIMEOUT_MS) {
@@ -192,6 +184,7 @@ static uint8_t softWriteMemory(uint16_t address, const uint8_t *source, uint16_t
         delay(1);
     }
 }
+
 #endif
 
 } // namespace
@@ -215,7 +208,6 @@ RingEEPROM::RingEEPROM()
       _lastGoodOffset(0),
       _lastGoodSequence(0) {
     memset(_signatureInline, 0, sizeof(_signatureInline));
-    memset(_ioBuffer, 0, sizeof(_ioBuffer));
 }
 
 uint8_t RingEEPROM::init(uint8_t device, const uint8_t *signature, uint16_t signatureLength) {
@@ -393,24 +385,28 @@ void RingEEPROM::insertCandidate(Candidate *candidates, uint8_t &count,
 }
 
 uint8_t RingEEPROM::readSequence(uint16_t offset, uint16_t &sequence) {
-    uint8_t bytes[2] = {0, 0};
-    const uint8_t status = readLogical((uint16_t)(offset + _signatureLength), bytes, _sequenceBytes);
+    uint8_t value = 0;
+    uint16_t logical = (uint16_t)((uint32_t)offset + _signatureLength);
+    uint8_t status = readLogicalByte(logical++, value);
     if (status != RING_OK) return status;
-    sequence = bytes[0];
-    if (_sequenceBytes == 2) sequence |= (uint16_t)bytes[1] << 8;
+
+    sequence = value;
+    if (_sequenceBytes == 2) {
+        status = readLogicalByte(logical, value);
+        if (status != RING_OK) return status;
+        sequence |= (uint16_t)value << 8;
+    }
     return RING_OK;
 }
 
 uint8_t RingEEPROM::scanSignature(uint16_t offset, bool &matches) {
     matches = false;
-    uint16_t done = 0;
-    while (done < _signatureLength) {
-        const uint16_t chunk = (uint16_t)(((uint32_t)(_signatureLength - done) > (uint32_t)sizeof(_ioBuffer))
-                                      ? sizeof(_ioBuffer) : (_signatureLength - done));
-        const uint8_t status = readLogical((uint16_t)(offset + done), _ioBuffer, chunk);
+    for (uint16_t i = 0; i < _signatureLength; ++i) {
+        uint8_t value = 0;
+        const uint16_t logical = (uint16_t)((uint32_t)offset + i);
+        const uint8_t status = readLogicalByte(logical, value);
         if (status != RING_OK) return status;
-        if (memcmp(_ioBuffer, _signature + done, chunk) != 0) return RING_OK;
-        done += chunk;
+        if (value != _signature[i]) return RING_OK;
     }
     matches = true;
     return RING_OK;
@@ -420,31 +416,24 @@ uint8_t RingEEPROM::findCandidates(Candidate *candidates, uint8_t &count, bool &
     count = 0;
     signatureSeen = false;
     const uint8_t first = _signature[0];
-    uint16_t offset = 0;
 
-    /* Отдельный блок сохраняет данные сканирования: scanSignature() использует _ioBuffer. */
-    uint8_t scanBuffer[RING_EEPROM_IO_BUFFER_SIZE];
-    while (offset < _ringSize) {
-        const uint16_t chunk = (uint16_t)(((uint32_t)(_ringSize - offset) > (uint32_t)sizeof(scanBuffer))
-                                      ? sizeof(scanBuffer) : (_ringSize - offset));
-        const uint8_t status = readLogical(offset, scanBuffer, chunk);
+    // Все позиции выделенной области читаются по одной; совпадения проверяются побайтно.
+    for (uint16_t offset = 0; offset < _ringSize; ++offset) {
+        uint8_t value = 0;
+        uint8_t status = readLogicalByte(offset, value);
         if (status != RING_OK) return status;
+        if (value != first) continue;
 
-        for (uint16_t i = 0; i < chunk; ++i) {
-            if (scanBuffer[i] != first) continue;
-            const uint16_t candidateOffset = (uint16_t)(offset + i);
-            bool matches = false;
-            const uint8_t compareStatus = scanSignature(candidateOffset, matches);
-            if (compareStatus != RING_OK) return compareStatus;
-            if (!matches) continue;
+        bool matches = false;
+        status = scanSignature(offset, matches);
+        if (status != RING_OK) return status;
+        if (!matches) continue;
 
-            signatureSeen = true;
-            uint16_t sequence = 0;
-            const uint8_t sequenceStatus = readSequence(candidateOffset, sequence);
-            if (sequenceStatus != RING_OK) return sequenceStatus;
-            insertCandidate(candidates, count, candidateOffset, sequence);
-        }
-        offset = (uint16_t)(offset + chunk);
+        signatureSeen = true;
+        uint16_t sequence = 0;
+        status = readSequence(offset, sequence);
+        if (status != RING_OK) return status;
+        insertCandidate(candidates, count, offset, sequence);
     }
     return RING_OK;
 }
@@ -472,64 +461,59 @@ uint8_t RingEEPROM::verifyRecord(uint16_t startOffset, uint16_t expectedSequence
     uint8_t crc8 = 0;
     uint16_t crc16 = 0;
     uint16_t logical = startOffset;
-    uint16_t done = 0;
+    uint8_t value = 0;
+    uint8_t status = RING_OK;
 
-    /* Сигнатура входит в CRC и одновременно перепроверяется с памятью. */
-    while (done < _signatureLength) {
-        const uint16_t chunk = (uint16_t)(((uint32_t)(_signatureLength - done) > (uint32_t)sizeof(_ioBuffer))
-                                      ? sizeof(_ioBuffer) : (_signatureLength - done));
-        uint8_t status = readLogical(logical, _ioBuffer, chunk);
+    // Сигнатура проверяется и включается в CRC по одному байту.
+    for (uint16_t i = 0; i < _signatureLength; ++i) {
+        status = readLogicalByte(logical++, value);
         if (status != RING_OK) return status;
-        if (memcmp(_ioBuffer, _signature + done, chunk) != 0) return ERR_SIGNATURE_INVALID;
-        for (uint16_t i = 0; i < chunk; ++i) {
-            if (_crcBytes == 1) crc8 = crcUpdate(crc8, _ioBuffer[i]);
-            else crc16 = crcUpdate(crc16, _ioBuffer[i]);
-        }
-        logical = (uint16_t)(logical + chunk);
-        done += chunk;
+        if (value != _signature[i]) return ERR_SIGNATURE_INVALID;
+        if (_crcBytes == 1) crc8 = crcUpdate(crc8, value);
+        else crc16 = crcUpdate(crc16, value);
     }
 
-    uint8_t sequenceData[2] = {0, 0};
-    uint8_t status = readLogical(logical, sequenceData, _sequenceBytes);
-    if (status != RING_OK) return status;
-    uint16_t actualSequence = sequenceData[0];
-    if (_sequenceBytes == 2) actualSequence |= (uint16_t)sequenceData[1] << 8;
-    if (actualSequence != expectedSequence) return ERR_SIGNATURE_INVALID;
+    uint16_t actualSequence = 0;
     for (uint8_t i = 0; i < _sequenceBytes; ++i) {
-        if (_crcBytes == 1) crc8 = crcUpdate(crc8, sequenceData[i]);
-        else crc16 = crcUpdate(crc16, sequenceData[i]);
-    }
-    logical = (uint16_t)(logical + _sequenceBytes);
-
-    done = 0;
-    while (done < _dataLength) {
-        const uint16_t chunk = (uint16_t)(((uint32_t)(_dataLength - done) > (uint32_t)sizeof(_ioBuffer))
-                                      ? sizeof(_ioBuffer) : (_dataLength - done));
-        status = readLogical((uint16_t)(logical + done), _ioBuffer, chunk);
+        status = readLogicalByte(logical++, value);
         if (status != RING_OK) return status;
-        for (uint16_t i = 0; i < chunk; ++i) {
-            if (_crcBytes == 1) crc8 = crcUpdate(crc8, _ioBuffer[i]);
-            else crc16 = crcUpdate(crc16, _ioBuffer[i]);
-        }
-        done += chunk;
+        actualSequence |= (uint16_t)value << (8U * i);
+        if (_crcBytes == 1) crc8 = crcUpdate(crc8, value);
+        else crc16 = crcUpdate(crc16, value);
     }
-    logical = (uint16_t)(logical + _dataLength);
+    if (actualSequence != expectedSequence) return ERR_SIGNATURE_INVALID;
 
-    uint8_t storedCrc[2] = {0, 0};
-    status = readLogical(logical, storedCrc, _crcBytes);
+    // Данные проверяются потоково, без промежуточного блока в SRAM.
+    for (uint16_t i = 0; i < _dataLength; ++i) {
+        status = readLogicalByte(logical++, value);
+        if (status != RING_OK) return status;
+        if (_crcBytes == 1) crc8 = crcUpdate(crc8, value);
+        else crc16 = crcUpdate(crc16, value);
+    }
+
+    uint8_t storedCrcLow = 0;
+    status = readLogicalByte(logical++, storedCrcLow);
     if (status != RING_OK) return status;
+
     if (_crcBytes == 1) {
-        if (storedCrc[0] != crc8) return ERR_READ_CRC_FAILED;
+        if (storedCrcLow != crc8) return ERR_READ_CRC_FAILED;
     } else {
-        const uint16_t stored = (uint16_t)storedCrc[0] | ((uint16_t)storedCrc[1] << 8);
+        uint8_t storedCrcHigh = 0;
+        status = readLogicalByte(logical, storedCrcHigh);
+        if (status != RING_OK) return status;
+        const uint16_t stored = (uint16_t)storedCrcLow |
+                                ((uint16_t)storedCrcHigh << 8);
         if (stored != crc16) return ERR_READ_CRC_FAILED;
     }
 
-    /* Данные копируются только после успешного CRC и только по запросу read(). */
+    // Только после успешной CRC второй проход копирует данные в объект пользователя.
     if (destinationOrNull != 0) {
-        const uint16_t dataOffset = (uint16_t)(startOffset + _signatureLength + _sequenceBytes);
-        status = readLogical(dataOffset, destinationOrNull, _dataLength);
-        if (status != RING_OK) return status;
+        const uint16_t dataOffset =
+            (uint16_t)((uint32_t)startOffset + _signatureLength + _sequenceBytes);
+        for (uint16_t i = 0; i < _dataLength; ++i) {
+            status = readLogicalByte((uint16_t)((uint32_t)dataOffset + i), destinationOrNull[i]);
+            if (status != RING_OK) return status;
+        }
     }
     return RING_OK;
 }
@@ -653,168 +637,131 @@ uint8_t RingEEPROM::writeRaw(const uint8_t *source, uint16_t dataLength) {
 }
 
 uint8_t RingEEPROM::writeRecord(uint16_t startOffset, uint16_t sequence, const uint8_t *data) {
-    uint8_t status;
+    uint8_t status = RING_OK;
     uint8_t crc8 = 0;
     uint16_t crc16 = 0;
     uint16_t logical = startOffset;
 
-    status = writeLogical(logical, _signature, _signatureLength);
-    if (status != RING_OK) return status;
+    // Сигнатура.
     for (uint16_t i = 0; i < _signatureLength; ++i) {
-        if (_crcBytes == 1) crc8 = crcUpdate(crc8, _signature[i]);
-        else crc16 = crcUpdate(crc16, _signature[i]);
+        const uint8_t value = _signature[i];
+        status = writeLogicalByte(logical++, value);
+        if (status != RING_OK) return status;
+        if (_crcBytes == 1) crc8 = crcUpdate(crc8, value);
+        else crc16 = crcUpdate(crc16, value);
     }
-    logical = (uint16_t)(logical + _signatureLength);
 
-    uint8_t sequenceData[2];
-    sequenceData[0] = (uint8_t)sequence;
-    sequenceData[1] = (uint8_t)(sequence >> 8);
-    status = writeLogical(logical, sequenceData, _sequenceBytes);
-    if (status != RING_OK) return status;
+    // Номер записи (little-endian).
     for (uint8_t i = 0; i < _sequenceBytes; ++i) {
-        if (_crcBytes == 1) crc8 = crcUpdate(crc8, sequenceData[i]);
-        else crc16 = crcUpdate(crc16, sequenceData[i]);
-    }
-    logical = (uint16_t)(logical + _sequenceBytes);
-
-    uint16_t done = 0;
-    while (done < _dataLength) {
-        const uint16_t chunk = (uint16_t)(((uint32_t)(_dataLength - done) > (uint32_t)sizeof(_ioBuffer))
-                                      ? sizeof(_ioBuffer) : (_dataLength - done));
-        for (uint16_t i = 0; i < chunk; ++i) {
-            if (_crcBytes == 1) crc8 = crcUpdate(crc8, data[done + i]);
-            else crc16 = crcUpdate(crc16, data[done + i]);
-        }
-        status = writeLogical((uint16_t)(logical + done), data + done, chunk);
+        const uint8_t value = (uint8_t)(sequence >> (8U * i));
+        status = writeLogicalByte(logical++, value);
         if (status != RING_OK) return status;
-        done += chunk;
+        if (_crcBytes == 1) crc8 = crcUpdate(crc8, value);
+        else crc16 = crcUpdate(crc16, value);
     }
-    logical = (uint16_t)(logical + _dataLength);
 
-    uint8_t crcData[2];
-    crcData[0] = (_crcBytes == 1) ? crc8 : (uint8_t)crc16;
-    crcData[1] = (uint8_t)(crc16 >> 8);
-    return writeLogical(logical, crcData, _crcBytes);
+    // Пользовательские данные.
+    for (uint16_t i = 0; i < _dataLength; ++i) {
+        const uint8_t value = data[i];
+        status = writeLogicalByte(logical++, value);
+        if (status != RING_OK) return status;
+        if (_crcBytes == 1) crc8 = crcUpdate(crc8, value);
+        else crc16 = crcUpdate(crc16, value);
+    }
+
+    // CRC записывается последней: младший байт первым.
+    const uint16_t crc = (_crcBytes == 1) ? crc8 : crc16;
+    status = writeLogicalByte(logical++, (uint8_t)crc);
+    if (status != RING_OK) return status;
+    if (_crcBytes == 2) status = writeLogicalByte(logical, (uint8_t)(crc >> 8));
+    return status;
 }
 
-uint8_t RingEEPROM::readLogical(uint16_t offset, uint8_t *destination, uint16_t length) {
-    if (_ringSize == 0 || destination == 0) return ERR_INVALID_ARGUMENT;
-    uint32_t logical = offset % _ringSize;
-    uint16_t done = 0;
-    while (done < length) {
-        const uint16_t contiguous = (uint16_t)(_ringSize - logical);
-        const uint16_t chunk = (uint16_t)((length - done < contiguous) ? (length - done) : contiguous);
-        const uint8_t status = readPhysical((uint16_t)(_start + logical), destination + done, chunk);
-        if (status != RING_OK) return status;
-        done = (uint16_t)(done + chunk);
-        logical = 0;
-    }
-    return RING_OK;
+uint8_t RingEEPROM::readLogicalByte(uint16_t offset, uint8_t &value) {
+    if (_ringSize == 0) return ERR_INVALID_ARGUMENT;
+    const uint16_t logical = (uint16_t)(offset % _ringSize);
+    return readPhysicalByte((uint16_t)(_start + logical), value);
 }
 
-uint8_t RingEEPROM::writeLogical(uint16_t offset, const uint8_t *source, uint16_t length) {
-    if (_ringSize == 0 || source == 0) return ERR_INVALID_ARGUMENT;
-    uint32_t logical = offset % _ringSize;
-    uint16_t done = 0;
-    while (done < length) {
-        const uint16_t contiguous = (uint16_t)(_ringSize - logical);
-        const uint16_t chunk = (uint16_t)((length - done < contiguous) ? (length - done) : contiguous);
-        const uint8_t status = writePhysical((uint16_t)(_start + logical), source + done, chunk);
-        if (status != RING_OK) return status;
-        done = (uint16_t)(done + chunk);
-        logical = 0;
-    }
-    return RING_OK;
+uint8_t RingEEPROM::writeLogicalByte(uint16_t offset, uint8_t value) {
+    if (_ringSize == 0) return ERR_INVALID_ARGUMENT;
+    const uint16_t logical = (uint16_t)(offset % _ringSize);
+    return writePhysicalByte((uint16_t)(_start + logical), value);
 }
 
-uint8_t RingEEPROM::readPhysical(uint16_t address, uint8_t *destination, uint16_t length) {
-    if ((uint32_t)address + length > _capacity) return ERR_ADDRESS_OUT_OF_RANGE;
-    if (length == 0) return RING_OK;
+uint8_t RingEEPROM::readPhysicalByte(uint16_t address, uint8_t &value) {
+    if (address >= _capacity) return ERR_ADDRESS_OUT_OF_RANGE;
 
     if (_device == RING_EEPROM_INTERNAL) {
 #if defined(ARDUINO_ARCH_AVR) || defined(__AVR__)
-        for (uint16_t i = 0; i < length; ++i) destination[i] = EEPROM.read(address + i);
+        value = EEPROM.read(address);
         return RING_OK;
 #else
         return ERR_DEVICE_NOT_SUPPORTED;
 #endif
     }
 
-    uint16_t done = 0;
-    while (done < length) {
-        const uint16_t chunk = (uint16_t)(((uint32_t)(length - done) > 30UL) ? 30U : (length - done));
 #if RING_EEPROM_USE_HARDWARE_I2C
-        Wire.beginTransmission((uint8_t)RING_EEPROM_I2C_ADDRESS);
-        Wire.write((uint8_t)((address + done) >> 8));
-        Wire.write((uint8_t)(address + done));
-        const uint8_t txStatus = Wire.endTransmission(false);
-        if (txStatus != 0) return mapWireError(txStatus);
-        Wire.clearWireTimeoutFlag();
-        const uint8_t received = (uint8_t)Wire.requestFrom((uint8_t)RING_EEPROM_I2C_ADDRESS, (uint8_t)chunk);
-        if (Wire.getWireTimeoutFlag()) {
-            while (Wire.available()) (void)Wire.read();
-            return ERR_I2C_TIMEOUT;
-        }
-        if (received != chunk) {
-            while (Wire.available()) (void)Wire.read();
-            return ERR_I2C_NO_RESPONSE;
-        }
-        for (uint16_t i = 0; i < chunk; ++i) {
-            if (!Wire.available()) return ERR_I2C_NO_RESPONSE;
-            destination[done + i] = (uint8_t)Wire.read();
-        }
-#else
-        const uint8_t softStatus = softReadMemory((uint16_t)(address + done), destination + done, chunk);
-        if (softStatus != RING_OK) return softStatus;
-#endif
-        done = (uint16_t)(done + chunk);
+    Wire.beginTransmission((uint8_t)RING_EEPROM_I2C_ADDRESS);
+    Wire.write((uint8_t)(address >> 8));
+    Wire.write((uint8_t)address);
+    const uint8_t txStatus = Wire.endTransmission(false);
+    if (txStatus != 0) return mapWireError(txStatus);
+
+    Wire.clearWireTimeoutFlag();
+    const uint8_t received = (uint8_t)Wire.requestFrom((uint8_t)RING_EEPROM_I2C_ADDRESS, (uint8_t)1);
+    if (Wire.getWireTimeoutFlag()) {
+        while (Wire.available()) (void)Wire.read();
+        return ERR_I2C_TIMEOUT;
     }
+    if (received != 1 || !Wire.available()) {
+        while (Wire.available()) (void)Wire.read();
+        return ERR_I2C_NO_RESPONSE;
+    }
+    const int readValue = Wire.read();
+    if (readValue < 0) return ERR_I2C_NO_RESPONSE;
+    value = (uint8_t)readValue;
     return RING_OK;
+#else
+    return softReadMemoryByte(address, value);
+#endif
 }
 
-uint8_t RingEEPROM::writePhysical(uint16_t address, const uint8_t *source, uint16_t length) {
-    if ((uint32_t)address + length > _capacity) return ERR_ADDRESS_OUT_OF_RANGE;
-    if (length == 0) return RING_OK;
+uint8_t RingEEPROM::writePhysicalByte(uint16_t address, uint8_t value) {
+    if (address >= _capacity) return ERR_ADDRESS_OUT_OF_RANGE;
 
     if (_device == RING_EEPROM_INTERNAL) {
 #if defined(ARDUINO_ARCH_AVR) || defined(__AVR__)
-        for (uint16_t i = 0; i < length; ++i) EEPROM.update(address + i, source[i]);
+        EEPROM.update(address, value);
         return RING_OK;
 #else
         return ERR_DEVICE_NOT_SUPPORTED;
 #endif
     }
 
-    uint16_t done = 0;
-    while (done < length) {
-        const uint16_t current = (uint16_t)(address + done);
-        const uint16_t pageRemaining = (uint16_t)(32U - (current % 32U));
-        uint16_t chunk = (uint16_t)((length - done < pageRemaining) ? (length - done) : pageRemaining);
-        if (chunk > 30U) chunk = 30U;
 #if RING_EEPROM_USE_HARDWARE_I2C
-        Wire.beginTransmission((uint8_t)RING_EEPROM_I2C_ADDRESS);
-        Wire.write((uint8_t)(current >> 8));
-        Wire.write((uint8_t)current);
-        for (uint16_t i = 0; i < chunk; ++i) Wire.write(source[done + i]);
-        const uint8_t txStatus = Wire.endTransmission();
-        if (txStatus != 0) return mapWireError(txStatus);
+    // Одна транзакция — адрес EEPROM и ровно один байт данных.
+    Wire.beginTransmission((uint8_t)RING_EEPROM_I2C_ADDRESS);
+    Wire.write((uint8_t)(address >> 8));
+    Wire.write((uint8_t)address);
+    Wire.write(value);
+    const uint8_t txStatus = Wire.endTransmission();
+    if (txStatus != 0) return mapWireError(txStatus);
 
-        const uint32_t started = millis();
-        bool ready = false;
-        while ((uint32_t)(millis() - started) < RING_EEPROM_I2C_TIMEOUT_MS) {
-            Wire.beginTransmission((uint8_t)RING_EEPROM_I2C_ADDRESS);
-            if (Wire.endTransmission() == 0) {
-                ready = true;
-                break;
-            }
-            delay(1);
+    // Каждая однобайтовая запись завершается отдельным ACK polling.
+    const uint32_t started = millis();
+    bool ready = false;
+    while ((uint32_t)(millis() - started) < RING_EEPROM_I2C_TIMEOUT_MS) {
+        Wire.beginTransmission((uint8_t)RING_EEPROM_I2C_ADDRESS);
+        if (Wire.endTransmission() == 0) {
+            ready = true;
+            break;
         }
-        if (!ready) return ERR_I2C_TIMEOUT;
-#else
-        const uint8_t softStatus = softWriteMemory(current, source + done, chunk);
-        if (softStatus != RING_OK) return softStatus;
-#endif
-        done = (uint16_t)(done + chunk);
+        delay(1);
     }
+    if (!ready) return ERR_I2C_TIMEOUT;
     return RING_OK;
+#else
+    return softWriteMemoryByte(address, value);
+#endif
 }

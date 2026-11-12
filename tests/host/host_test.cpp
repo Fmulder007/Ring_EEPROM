@@ -14,6 +14,8 @@ static uint8_t rxLen, rxPos;
 static bool devicePresent = true;
 static bool corruptNextExternalWrite = false;
 static uint32_t externalReadBytes = 0;
+static bool nonByteI2CRead = false;
+static bool nonByteI2CWrite = false;
 EEPROMClass EEPROM;
 TwoWire Wire;
 
@@ -37,24 +39,22 @@ uint8_t TwoWire::endTransmission(bool) {
     if (!devicePresent) return 2;
     if (txLen >= 2) {
         memPtr = ((uint16_t)tx[0] << 8) | tx[1];
+        if (txLen > 3) nonByteI2CWrite = true;
         if (txLen > 2) {
-            const uint16_t pageBase = (uint16_t)(memPtr & (uint16_t)~31U);
-            const uint16_t pageOffset = (uint16_t)(memPtr & 31U);
             for (uint8_t i = 2; i < txLen; ++i) {
                 uint8_t value = tx[i];
                 if (corruptNextExternalWrite && i == 2) {
                     value ^= 0x01;
                     corruptNextExternalWrite = false;
                 }
-                const uint16_t address = (uint16_t)(pageBase | ((pageOffset + i - 2U) & 31U));
-                extMem[address] = value;
+                extMem[memPtr++] = value;
             }
-            memPtr = (uint16_t)(memPtr + txLen - 2U);
         }
     }
     return 0;
 }
 uint8_t TwoWire::requestFrom(uint8_t, uint8_t n) {
+    if (n != 1) nonByteI2CRead = true;
     externalReadBytes += n;
     rxLen = n;
     rxPos = 0;
@@ -193,6 +193,9 @@ int main() {
     devicePresent = false;
     rc = Ring_EEPROM.init(AT24C32, 0xA3);
     if (rc != ERR_I2C_NO_RESPONSE) return 19;
+
+    // Внешняя EEPROM должна обслуживаться только однобайтовыми I2C-операциями.
+    if (nonByteI2CRead || nonByteI2CWrite) return 26;
 
     return 0;
 }

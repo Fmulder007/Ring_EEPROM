@@ -14,6 +14,8 @@
 
 Другие семейства в первую версию не входят. Для AT24C32/AT24C64 библиотека сама запускает I²C. Отдельно подключать Wire.h или EEPROM.h в скетче не нужно.
 
+Все EEPROM обслуживаются единообразно и строго побайтно: ядро обращается к общим операциям чтения и записи одного логического байта, а физический драйвер выполняет ровно одно байтовое обращение к выбранной памяти. Для AT24 каждый байт передаётся отдельной I²C-транзакцией; после каждой записи выполняется ACK polling. Page Write и блочное чтение/запись не используются.
+
 ## Быстрый старт
 
 ~~~cpp
@@ -169,7 +171,6 @@ M = S + B + D
 | RING_EEPROM_CRC8_MAX_BYTES | 30 | Порог CRC-8/CRC-16 |
 | RING_EEPROM_CRC8_POLY | 0xE7 | Полином CRC-8 |
 | RING_EEPROM_CRC16_POLY | 0x8D95 | Полином CRC-16 |
-| RING_EEPROM_IO_BUFFER_SIZE | 32 | Фиксированный буфер |
 | RING_EEPROM_INLINE_SIGNATURE_MAX | 16 | Размер встроенной копии сигнатуры |
 
 На ATmega328P штатный аппаратный I²C использует A4/A5. При переопределении SDA/SCL библиотека автоматически переключается на программный I²C.
@@ -220,5 +221,5 @@ sh tests/host/run.sh
 
 ## Аппаратные источники
 
-- [Microchip AT24C32/AT24C64 datasheet](https://ww1.microchip.com/downloads/en/DeviceDoc/doc0336.pdf) — ёмкости, страница записи 32 байта и ACK polling.
+- [Microchip AT24C32/AT24C64 datasheet](https://ww1.microchip.com/downloads/en/DeviceDoc/doc0336.pdf) — ёмкости и протокол I²C; библиотека использует однобайтовую запись с ACK polling, без Page Write.
 - [AVR-LibC: E2END](https://avrdudes.github.io/avr-libc/avr-libc-user-manual/group__avr__io.html) — последний адрес внутренней EEPROM; размер равен E2END + 1.

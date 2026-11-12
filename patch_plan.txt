@@ -35,8 +35,6 @@ private:
     uint16_t _step;
     uint16_t _dataLength;
 
-    uint8_t _ioBuffer[RING_EEPROM_IO_BUFFER_SIZE];
-
     // кэш последнего успешного положения (ускоряет типичный случай)
     bool     _hasLastGood;
     uint16_t _lastGoodOffset;

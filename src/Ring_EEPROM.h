@@ -109,10 +109,6 @@ enum RingEEPROMDevice : uint8_t {
 #define RING_EEPROM_CRC16_POLY 0x8D95
 #endif
 
-#ifndef RING_EEPROM_IO_BUFFER_SIZE
-#define RING_EEPROM_IO_BUFFER_SIZE 32
-#endif
-
 #ifndef RING_EEPROM_INLINE_SIGNATURE_MAX
 #define RING_EEPROM_INLINE_SIGNATURE_MAX 16
 #endif
@@ -222,10 +218,10 @@ private:
     uint8_t readSequence(uint16_t offset, uint16_t &sequence);
     uint8_t writeRecord(uint16_t startOffset, uint16_t sequence, const uint8_t *data);
 
-    uint8_t readLogical(uint16_t offset, uint8_t *destination, uint16_t length);
-    uint8_t writeLogical(uint16_t offset, const uint8_t *source, uint16_t length);
-    uint8_t readPhysical(uint16_t address, uint8_t *destination, uint16_t length);
-    uint8_t writePhysical(uint16_t address, const uint8_t *source, uint16_t length);
+    uint8_t readLogicalByte(uint16_t offset, uint8_t &value);
+    uint8_t writeLogicalByte(uint16_t offset, uint8_t value);
+    uint8_t readPhysicalByte(uint16_t address, uint8_t &value);
+    uint8_t writePhysicalByte(uint16_t address, uint8_t value);
 
     uint8_t crcUpdate(uint8_t crc, uint8_t value) const;
     uint16_t crcUpdate(uint16_t crc, uint8_t value) const;
@@ -250,8 +246,6 @@ private:
     uint16_t _recordLength;
     uint16_t _step;
     uint16_t _dataLength;
-
-    uint8_t _ioBuffer[RING_EEPROM_IO_BUFFER_SIZE];
 
     // Кэш последней успешно проверенной записи.
     bool _hasLastGood;
