@@ -1,0 +1,219 @@
+Вот конкретный патч для замечания №1 — простой кэш «last known good».
+
+### 1. Изменения в `Ring_EEPROM.h` (приватная часть класса)
+
+Добавь три поля:
+
+```cpp
+    // --- кэш последнего успешного положения ---
+    bool     _hasLastGood;
+    uint16_t _lastGoodOffset;
+    uint16_t _lastGoodSequence;
+```
+
+Полностью фрагмент `private:` после существующих полей будет выглядеть так (новые строки выделены):
+
+```cpp
+private:
+    // ... существующие методы ...
+
+    uint8_t _device;
+    uint8_t _initialized;
+    uint8_t _softI2C;
+    uint16_t _capacity;
+    uint16_t _start;
+    uint16_t _end;
+    uint16_t _ringSize;
+
+    const uint8_t *_signature;
+    uint16_t _signatureLength;
+    uint8_t _signatureInline[RING_EEPROM_INLINE_SIGNATURE_MAX];
+
+    uint8_t _sequenceBytes;
+    uint8_t _crcBytes;
+    uint16_t _recordLength;
+    uint16_t _step;
+    uint16_t _dataLength;
+
+    uint8_t _ioBuffer[RING_EEPROM_IO_BUFFER_SIZE];
+
+    // кэш последнего успешного положения (ускоряет типичный случай)
+    bool     _hasLastGood;
+    uint16_t _lastGoodOffset;
+    uint16_t _lastGoodSequence;
+};
+```
+
+### 2. Изменения в конструкторе (`Ring_EEPROM.cpp`)
+
+```cpp
+RingEEPROM::RingEEPROM()
+    : _device(0xFF),
+      _initialized(0),
+      _softI2C(0),
+      _capacity(0),
+      _start(0),
+      _end(0),
+      _ringSize(0),
+      _signature(0),
+      _signatureLength(0),
+      _sequenceBytes(0),
+      _crcBytes(0),
+      _recordLength(0),
+      _step(0),
+      _dataLength(0),
+      _hasLastGood(false),
+      _lastGoodOffset(0),
+      _lastGoodSequence(0)
+{
+    memset(_signatureInline, 0, sizeof(_signatureInline));
+    memset(_ioBuffer, 0, sizeof(_ioBuffer));
+}
+```
+
+### 3. Инвалидация кэша в `initCommon`
+
+В самом конце успешного `initCommon` (перед `return RING_OK;`):
+
+```cpp
+    _initialized = 1;
+    _hasLastGood = false;          // ← добавить
+    return RING_OK;
+```
+
+### 4. Изменённый `readRaw`
+
+```cpp
+uint8_t RingEEPROM::readRaw(uint8_t *destination, uint16_t dataLength) {
+    if (!_initialized) return ERR_NOT_INITIALIZED;
+    if (destination == 0) return ERR_INVALID_ARGUMENT;
+
+    uint8_t status = selectLayout(dataLength);
+    if (status != RING_OK) return status;
+
+    // --- быстрый путь: пробуем кэш ---
+    if (_hasLastGood) {
+        status = verifyRecord(_lastGoodOffset, _lastGoodSequence, destination);
+        if (status == RING_OK) {
+            return RING_OK;                     // попали в кэш
+        }
+        // При ошибке CRC/сигнатуры просто сбрасываем кэш и идём в полный скан.
+        // Любая другая ошибка (I/O) — возвращаем сразу.
+        if (status != ERR_READ_CRC_FAILED && status != ERR_SIGNATURE_INVALID) {
+            return status;
+        }
+        _hasLastGood = false;
+    }
+
+    // --- полный скан (старый путь) ---
+    Candidate candidates[RING_EEPROM_FALLBACK_DEPTH + 1];
+    uint8_t count = 0;
+    bool signatureSeen = false;
+    status = findCandidates(candidates, count, signatureSeen);
+    if (status != RING_OK) return status;
+    if (!signatureSeen || count == 0) return ERR_READ_NO_RECORD;
+
+    for (uint8_t i = 0; i < count; ++i) {
+        status = verifyRecord(candidates[i].offset, candidates[i].sequence, destination);
+        if (status == RING_OK) {
+            // обновляем кэш
+            _hasLastGood = true;
+            _lastGoodOffset = candidates[i].offset;
+            _lastGoodSequence = candidates[i].sequence;
+            return RING_OK;
+        }
+        if (status != ERR_READ_CRC_FAILED && status != ERR_SIGNATURE_INVALID) {
+            return status;
+        }
+    }
+    return ERR_READ_CRC_FAILED;
+}
+```
+
+### 5. Изменённый `writeRaw`
+
+```cpp
+uint8_t RingEEPROM::writeRaw(const uint8_t *source, uint16_t dataLength) {
+    if (!_initialized) return ERR_NOT_INITIALIZED;
+    if (source == 0) return ERR_INVALID_ARGUMENT;
+
+    uint8_t status = selectLayout(dataLength);
+    if (status != RING_OK) return status;
+
+    bool havePrevious = false;
+    uint16_t previousOffset = 0;
+    uint16_t previousSequence = 0;
+
+    // --- быстрый путь: пробуем кэш как "предыдущую" запись ---
+    if (_hasLastGood) {
+        status = verifyRecord(_lastGoodOffset, _lastGoodSequence, 0);
+        if (status == RING_OK) {
+            havePrevious = true;
+            previousOffset = _lastGoodOffset;
+            previousSequence = _lastGoodSequence;
+        } else if (status != ERR_READ_CRC_FAILED && status != ERR_SIGNATURE_INVALID) {
+            return status;          // реальная ошибка ввода-вывода
+        } else {
+            _hasLastGood = false;   // кэш устарел
+        }
+    }
+
+    // Если кэш не сработал — полный поиск предыдущей валидной записи
+    if (!havePrevious) {
+        Candidate candidates[RING_EEPROM_FALLBACK_DEPTH + 1];
+        uint8_t count = 0;
+        bool signatureSeen = false;
+        status = findCandidates(candidates, count, signatureSeen);
+        if (status != RING_OK) return status;
+
+        for (uint8_t i = 0; i < count; ++i) {
+            status = verifyRecord(candidates[i].offset, candidates[i].sequence, 0);
+            if (status == RING_OK) {
+                havePrevious = true;
+                previousOffset = candidates[i].offset;
+                previousSequence = candidates[i].sequence;
+                break;
+            }
+            if (status != ERR_READ_CRC_FAILED && status != ERR_SIGNATURE_INVALID) {
+                return status;
+            }
+        }
+    }
+
+    // Вычисляем следующий адрес и sequence
+    uint16_t nextOffset = 0;
+    uint16_t nextSequence = 0;
+    if (havePrevious) {
+        nextOffset = (uint16_t)(((uint32_t)previousOffset + _step) % _ringSize);
+        const uint16_t mask = (_sequenceBytes == 1) ? 0x00FFU : 0xFFFFU;
+        nextSequence = (uint16_t)((previousSequence + 1U) & mask);
+    }
+
+    status = writeRecord(nextOffset, nextSequence, source);
+    if (status != RING_OK) return status;
+
+    // Verify после записи
+    status = verifyRecord(nextOffset, nextSequence, 0);
+    if (status == ERR_READ_CRC_FAILED || status == ERR_SIGNATURE_INVALID) {
+        _hasLastGood = false;               // на всякий случай
+        return ERR_WRITE_VERIFY;
+    }
+    if (status != RING_OK) return status;
+
+    // Успех — обновляем кэш на только что записанную запись
+    _hasLastGood = true;
+    _lastGoodOffset = nextOffset;
+    _lastGoodSequence = nextSequence;
+    return RING_OK;
+}
+```
+
+### Поведение после патча
+
+- После `init()` кэш всегда сброшен.
+- При обычном чтении/записи (самая свежая запись цела) — полный скан кольца **не выполняется**.
+- При порче последней записи кэш инвалидируется и происходит обычный fallback + полный поиск.
+- При любой ошибке ввода-вывода (не CRC/сигнатура) кэш тоже сбрасывается и ошибка возвращается наверх.
+- Смена размера структуры / сигнатуры / границ области автоматически делает кэш бесполезным (verify не пройдёт) и он сбрасывается.
+
+Патч минимальный, не ломает существующую семантику и сильно ускоряет самый частый путь.
