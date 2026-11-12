@@ -4,7 +4,9 @@
 #include <stddef.h>
 #define A4 18
 #define A5 19
+#ifndef INTERNAL
 #define INTERNAL 3 /* Mirrors Arduino AVR analogReference macro. */
+#endif
 #define HIGH 1
 #define LOW 0
 #define INPUT_PULLUP 2
