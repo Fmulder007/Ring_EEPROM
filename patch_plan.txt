@@ -65,7 +65,6 @@ RingEEPROM::RingEEPROM()
       _lastGoodSequence(0)
 {
     memset(_signatureInline, 0, sizeof(_signatureInline));
-    memset(_ioBuffer, 0, sizeof(_ioBuffer));
 }
 ```
 
