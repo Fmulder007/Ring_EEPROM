@@ -438,19 +438,6 @@ uint8_t RingEEPROM::findCandidates(Candidate *candidates, uint8_t &count, bool &
             uint16_t sequence = 0;
             const uint8_t sequenceStatus = readSequence(candidateOffset, sequence);
             if (sequenceStatus != RING_OK) return sequenceStatus;
-
-            /*
-               A matching signature can also occur inside user data. Keep only
-               candidates whose complete record validates, otherwise arbitrary
-               byte patterns with large sequence values could crowd the fallback
-               candidate list and hide a real record.
-            */
-            const uint8_t verifyStatus = verifyRecord(candidateOffset, sequence, 0);
-            if (verifyStatus == ERR_READ_CRC_FAILED ||
-                verifyStatus == ERR_SIGNATURE_INVALID) {
-                continue;
-            }
-            if (verifyStatus != RING_OK) return verifyStatus;
             insertCandidate(candidates, count, candidateOffset, sequence);
         }
         offset = (uint16_t)(offset + chunk);
@@ -554,8 +541,7 @@ uint8_t RingEEPROM::readRaw(uint8_t *destination, uint16_t dataLength) {
     bool signatureSeen = false;
     status = findCandidates(candidates, count, signatureSeen);
     if (status != RING_OK) return status;
-    if (!signatureSeen) return ERR_READ_NO_RECORD;
-    if (count == 0) return ERR_READ_CRC_FAILED;
+    if (!signatureSeen || count == 0) return ERR_READ_NO_RECORD;
 
     for (uint8_t i = 0; i < count; ++i) {
         status = verifyRecord(candidates[i].offset, candidates[i].sequence, destination);
