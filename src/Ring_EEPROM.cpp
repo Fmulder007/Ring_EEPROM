@@ -210,7 +210,10 @@ RingEEPROM::RingEEPROM()
       _crcBytes(0),
       _recordLength(0),
       _step(0),
-      _dataLength(0) {
+      _dataLength(0),
+      _hasLastGood(false),
+      _lastGoodOffset(0),
+      _lastGoodSequence(0) {
     memset(_signatureInline, 0, sizeof(_signatureInline));
     memset(_ioBuffer, 0, sizeof(_ioBuffer));
 }
@@ -316,6 +319,7 @@ uint8_t RingEEPROM::initCommon(uint8_t device, const uint8_t *signature,
     }
 
     _initialized = 1;
+    _hasLastGood = false;
     return RING_OK;
 }
 
@@ -533,9 +537,24 @@ uint8_t RingEEPROM::verifyRecord(uint16_t startOffset, uint16_t expectedSequence
 uint8_t RingEEPROM::readRaw(uint8_t *destination, uint16_t dataLength) {
     if (!_initialized) return ERR_NOT_INITIALIZED;
     if (destination == 0) return ERR_INVALID_ARGUMENT;
+
     uint8_t status = selectLayout(dataLength);
     if (status != RING_OK) return status;
 
+    // Быстрый путь: проверяем последнюю успешно сохранённую позицию.
+    if (_hasLastGood) {
+        status = verifyRecord(_lastGoodOffset, _lastGoodSequence, destination);
+        if (status == RING_OK) return RING_OK;
+
+        // Если запись повреждена, сбрасываем кэш и выполняем полный поиск.
+        // Ошибки физического чтения возвращаем вызывающему коду без подмены.
+        if (status != ERR_READ_CRC_FAILED && status != ERR_SIGNATURE_INVALID) {
+            return status;
+        }
+        _hasLastGood = false;
+    }
+
+    // Полный поиск используется при пустом/сброшенном кэше или его повреждении.
     Candidate candidates[RING_EEPROM_FALLBACK_DEPTH + 1];
     uint8_t count = 0;
     bool signatureSeen = false;
@@ -545,8 +564,15 @@ uint8_t RingEEPROM::readRaw(uint8_t *destination, uint16_t dataLength) {
 
     for (uint8_t i = 0; i < count; ++i) {
         status = verifyRecord(candidates[i].offset, candidates[i].sequence, destination);
-        if (status == RING_OK) return RING_OK;
-        if (status != ERR_READ_CRC_FAILED && status != ERR_SIGNATURE_INVALID) return status;
+        if (status == RING_OK) {
+            _hasLastGood = true;
+            _lastGoodOffset = candidates[i].offset;
+            _lastGoodSequence = candidates[i].sequence;
+            return RING_OK;
+        }
+        if (status != ERR_READ_CRC_FAILED && status != ERR_SIGNATURE_INVALID) {
+            return status;
+        }
     }
     return ERR_READ_CRC_FAILED;
 }
@@ -554,29 +580,52 @@ uint8_t RingEEPROM::readRaw(uint8_t *destination, uint16_t dataLength) {
 uint8_t RingEEPROM::writeRaw(const uint8_t *source, uint16_t dataLength) {
     if (!_initialized) return ERR_NOT_INITIALIZED;
     if (source == 0) return ERR_INVALID_ARGUMENT;
-    uint8_t status = selectLayout(dataLength);
-    if (status != RING_OK) return status;
 
-    Candidate candidates[RING_EEPROM_FALLBACK_DEPTH + 1];
-    uint8_t count = 0;
-    bool signatureSeen = false;
-    status = findCandidates(candidates, count, signatureSeen);
+    uint8_t status = selectLayout(dataLength);
     if (status != RING_OK) return status;
 
     bool havePrevious = false;
     uint16_t previousOffset = 0;
     uint16_t previousSequence = 0;
-    for (uint8_t i = 0; i < count; ++i) {
-        status = verifyRecord(candidates[i].offset, candidates[i].sequence, 0);
+
+    // Быстрый путь: используем кэш как предыдущую успешную запись.
+    if (_hasLastGood) {
+        status = verifyRecord(_lastGoodOffset, _lastGoodSequence, 0);
         if (status == RING_OK) {
             havePrevious = true;
-            previousOffset = candidates[i].offset;
-            previousSequence = candidates[i].sequence;
-            break;
+            previousOffset = _lastGoodOffset;
+            previousSequence = _lastGoodSequence;
+        } else if (status == ERR_READ_CRC_FAILED || status == ERR_SIGNATURE_INVALID) {
+            _hasLastGood = false;
+        } else {
+            // При ошибке физического чтения запись не считается повреждённой.
+            return status;
         }
-        if (status != ERR_READ_CRC_FAILED && status != ERR_SIGNATURE_INVALID) return status;
     }
 
+    // Если кэш отсутствует или оказался повреждён, ищем предыдущую запись обычным способом.
+    if (!havePrevious) {
+        Candidate candidates[RING_EEPROM_FALLBACK_DEPTH + 1];
+        uint8_t count = 0;
+        bool signatureSeen = false;
+        status = findCandidates(candidates, count, signatureSeen);
+        if (status != RING_OK) return status;
+
+        for (uint8_t i = 0; i < count; ++i) {
+            status = verifyRecord(candidates[i].offset, candidates[i].sequence, 0);
+            if (status == RING_OK) {
+                havePrevious = true;
+                previousOffset = candidates[i].offset;
+                previousSequence = candidates[i].sequence;
+                break;
+            }
+            if (status != ERR_READ_CRC_FAILED && status != ERR_SIGNATURE_INVALID) {
+                return status;
+            }
+        }
+    }
+
+    // Вычисляем следующий адрес и номер записи.
     uint16_t nextOffset = 0;
     uint16_t nextSequence = 0;
     if (havePrevious) {
@@ -588,10 +637,18 @@ uint8_t RingEEPROM::writeRaw(const uint8_t *source, uint16_t dataLength) {
     status = writeRecord(nextOffset, nextSequence, source);
     if (status != RING_OK) return status;
 
-    /* Используется та же процедура проверки, что и в read(), без копирования данных. */
+    // Проверяем новую запись чтением обратно. При неудаче старый кэш не заменяем:
+    // последней успешной записью остаётся предыдущая проверенная запись.
     status = verifyRecord(nextOffset, nextSequence, 0);
-    if (status == ERR_READ_CRC_FAILED || status == ERR_SIGNATURE_INVALID) return ERR_WRITE_VERIFY;
+    if (status == ERR_READ_CRC_FAILED || status == ERR_SIGNATURE_INVALID) {
+        return ERR_WRITE_VERIFY;
+    }
     if (status != RING_OK) return status;
+
+    // Кэш обновляется только после успешной проверки новой записи.
+    _hasLastGood = true;
+    _lastGoodOffset = nextOffset;
+    _lastGoodSequence = nextSequence;
     return RING_OK;
 }
 

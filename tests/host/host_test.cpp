@@ -13,6 +13,7 @@ static uint8_t rx[32];
 static uint8_t rxLen, rxPos;
 static bool devicePresent = true;
 static bool corruptNextExternalWrite = false;
+static uint32_t externalReadBytes = 0;
 EEPROMClass EEPROM;
 TwoWire Wire;
 
@@ -54,6 +55,7 @@ uint8_t TwoWire::endTransmission(bool) {
     return 0;
 }
 uint8_t TwoWire::requestFrom(uint8_t, uint8_t n) {
+    externalReadBytes += n;
     rxLen = n;
     rxPos = 0;
     for (uint8_t i = 0; i < n; ++i) rx[i] = extMem[memPtr++];
@@ -107,8 +109,25 @@ int main() {
     Tiny tiny = {1, 2, 0x1234};
     rc = Ring_EEPROM.write(tiny);
     if (rc != RING_OK) return 5;
+    externalReadBytes = 0;
     rc = Ring_EEPROM.read(out);
     if (rc != RING_OK || memcmp(&tiny, &out, sizeof(tiny)) != 0) return 6;
+    if (externalReadBytes >= 128) return 20; // cache hit: без полного сканирования
+
+    externalReadBytes = 0;
+    rc = Ring_EEPROM.write(tiny);
+    if (rc != RING_OK) return 21;
+    if (externalReadBytes >= 128) return 22; // write() тоже использует кэш
+
+    // Неудачная новая запись не заменяет последнюю успешно проверенную запись.
+    corruptNextExternalWrite = true;
+    rc = Ring_EEPROM.write(tiny);
+    if (rc != ERR_WRITE_VERIFY) return 23;
+
+    externalReadBytes = 0;
+    rc = Ring_EEPROM.read(out);
+    if (rc != RING_OK || memcmp(&tiny, &out, sizeof(tiny)) != 0) return 24;
+    if (externalReadBytes >= 128) return 25; // старый last-good кэш сохранён
 
     /* Several sequential records. Latest is damaged: read() falls back one record. */
     for (uint8_t i = 0; i < 6; ++i) {
@@ -118,16 +137,16 @@ int main() {
         rc = Ring_EEPROM.write(tiny);
         if (rc != RING_OK) return 7;
     }
-    /* B=2, CRC-8=1, L=10, P=11; newest start after the initial write is 66. */
-    extMem[66 + 9] ^= 0x80;
+    /* B=2, CRC-8=1, L=10, P=11; newest start is 77 after the extra successful write. */
+    extMem[77 + 9] ^= 0x80;
     rc = Ring_EEPROM.read(out);
     if (rc != RING_OK) return 8;
     if (out.a != 4) return 9;
 
     /* Damage the remaining three fallback candidates as well. */
+    extMem[66 + 9] ^= 0x80;
     extMem[55 + 9] ^= 0x80;
     extMem[44 + 9] ^= 0x80;
-    extMem[33 + 9] ^= 0x80;
     rc = Ring_EEPROM.read(out);
     if (rc != ERR_READ_CRC_FAILED) return 10;
 

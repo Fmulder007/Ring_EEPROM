@@ -252,6 +252,11 @@ private:
     uint16_t _dataLength;
 
     uint8_t _ioBuffer[RING_EEPROM_IO_BUFFER_SIZE];
+
+    // Кэш последней успешно проверенной записи.
+    bool _hasLastGood;
+    uint16_t _lastGoodOffset;
+    uint16_t _lastGoodSequence;
 };
 
 extern RingEEPROM Ring_EEPROM;
