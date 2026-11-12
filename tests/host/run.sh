@@ -41,8 +41,6 @@ CXX=\${CXX:-g++}
   -I"$ROOT/tests/host/include" -I"$ROOT/src" \
   -c "$ROOT/tests/host/api_compile.cpp" -o "$BUILD/api_compile.o"
 
-printf '%s\n' "Ring_EEPROM host tests: OK"
-
 # Compile the independent block-I/O implementation and both public headers together.
 "$CXX" -std=c++11 -Wall -Wextra -Werror \
   -DARDUINO_ARCH_AVR -DE2END=1023 \
@@ -53,3 +51,14 @@ printf '%s\n' "Ring_EEPROM host tests: OK"
   -DARDUINO_ARCH_AVR -DE2END=1023 \
   -I"$ROOT/tests/host/include" -I"$ROOT/src" \
   -c "$ROOT/tests/host/combined_api_compile.cpp" -o "$BUILD/combined_api_compile.o"
+
+# Link both implementations into one program to catch duplicate public symbols.
+"$CXX" -std=c++11 -Wall -Wextra -Werror \
+  -DARDUINO_ARCH_AVR -DE2END=1023 \
+  -I"$ROOT/tests/host/include" -I"$ROOT/src" \
+  "$ROOT/src/Ring_EEPROM.cpp" "$ROOT/src/Block_Ring_EEPROM.cpp" \
+  "$ROOT/tests/host/host_test.cpp" "$ROOT/tests/host/combined_api_compile.cpp" \
+  -o "$BUILD/combined_test"
+"$BUILD/combined_test"
+
+printf '%s\n' "Ring_EEPROM host tests and dual-library link: OK"
