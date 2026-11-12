@@ -215,21 +215,21 @@ RingEEPROM::RingEEPROM()
     memset(_ioBuffer, 0, sizeof(_ioBuffer));
 }
 
-uint8_t RingEEPROM::init(RingEEPROMDevice device, const uint8_t *signature, uint16_t signatureLength) {
+uint8_t RingEEPROM::init(uint8_t device, const uint8_t *signature, uint16_t signatureLength) {
     return initArray(device, signature, signatureLength, false, 0, 0);
 }
 
-uint8_t RingEEPROM::init(RingEEPROMDevice device, const uint8_t *signature, uint16_t signatureLength,
+uint8_t RingEEPROM::init(uint8_t device, const uint8_t *signature, uint16_t signatureLength,
                          uint16_t startAddress, uint16_t endAddress) {
     return initArray(device, signature, signatureLength, true, startAddress, endAddress);
 }
 
-uint8_t RingEEPROM::initScalar(RingEEPROMDevice device, const uint8_t *signature, uint16_t signatureLength,
+uint8_t RingEEPROM::initScalar(uint8_t device, const uint8_t *signature, uint16_t signatureLength,
                                bool hasRange, uint16_t startAddress, uint16_t endAddress) {
     return initCommon(device, signature, signatureLength, true, hasRange, startAddress, endAddress);
 }
 
-uint8_t RingEEPROM::initArray(RingEEPROMDevice device, const uint8_t *signature, uint16_t signatureLength,
+uint8_t RingEEPROM::initArray(uint8_t device, const uint8_t *signature, uint16_t signatureLength,
                               bool hasRange, uint16_t startAddress, uint16_t endAddress) {
     /* Короткие массивы копируются, чтобы локальная переменная не потеряла срок жизни.
        Длинная подпись хранится по указателю; её исходный массив должен оставаться доступен. */
@@ -238,11 +238,15 @@ uint8_t RingEEPROM::initArray(RingEEPROMDevice device, const uint8_t *signature,
                       startAddress, endAddress);
 }
 
-uint8_t RingEEPROM::initCommon(RingEEPROMDevice device, const uint8_t *signature,
+uint8_t RingEEPROM::initCommon(uint8_t device, const uint8_t *signature,
                                uint16_t signatureLength, bool copySignature,
                                bool hasRange, uint16_t startAddress, uint16_t endAddress) {
     _initialized = 0;
-    _device = (uint8_t)device;
+    /* Arduino AVR already uses INTERNAL for analogReference(); accept that value too. */
+    if (device == (uint8_t)INTERNAL || device == (uint8_t)RING_EEPROM_INTERNAL) {
+        device = (uint8_t)RING_EEPROM_INTERNAL;
+    }
+    _device = device;
     _capacity = 0;
     _ringSize = 0;
     _signature = 0;
@@ -260,7 +264,7 @@ uint8_t RingEEPROM::initCommon(RingEEPROMDevice device, const uint8_t *signature
     }
     _signatureLength = signatureLength;
 
-    if (device == INTERNAL) {
+    if (device == RING_EEPROM_INTERNAL) {
 #if defined(ARDUINO_ARCH_AVR) || defined(__AVR__)
     #if defined(E2END)
         _capacity = (uint16_t)(E2END + 1UL);
@@ -290,7 +294,7 @@ uint8_t RingEEPROM::initCommon(RingEEPROMDevice device, const uint8_t *signature
     _ringSize = (uint16_t)(_end - _start + 1U);
     if (_ringSize == 0) return ERR_INVALID_RANGE;
 
-    if (device != INTERNAL) {
+    if (device != RING_EEPROM_INTERNAL) {
 #if RING_EEPROM_USE_HARDWARE_I2C
         _softI2C = 0;
         Wire.begin();
@@ -412,14 +416,16 @@ uint8_t RingEEPROM::findCandidates(Candidate *candidates, uint8_t &count, bool &
     const uint8_t first = _signature[0];
     uint16_t offset = 0;
 
+    /* Отдельный блок сохраняет данные сканирования: scanSignature() использует _ioBuffer. */
+    uint8_t scanBuffer[RING_EEPROM_IO_BUFFER_SIZE];
     while (offset < _ringSize) {
-        const uint16_t chunk = (uint16_t)(((uint32_t)(_ringSize - offset) > (uint32_t)sizeof(_ioBuffer))
-                                      ? sizeof(_ioBuffer) : (_ringSize - offset));
-        const uint8_t status = readLogical(offset, _ioBuffer, chunk);
+        const uint16_t chunk = (uint16_t)(((uint32_t)(_ringSize - offset) > (uint32_t)sizeof(scanBuffer))
+                                      ? sizeof(scanBuffer) : (_ringSize - offset));
+        const uint8_t status = readLogical(offset, scanBuffer, chunk);
         if (status != RING_OK) return status;
 
         for (uint16_t i = 0; i < chunk; ++i) {
-            if (_ioBuffer[i] != first) continue;
+            if (scanBuffer[i] != first) continue;
             const uint16_t candidateOffset = (uint16_t)(offset + i);
             bool matches = false;
             const uint8_t compareStatus = scanSignature(candidateOffset, matches);
@@ -666,7 +672,7 @@ uint8_t RingEEPROM::readPhysical(uint16_t address, uint8_t *destination, uint16_
     if ((uint32_t)address + length > _capacity) return ERR_ADDRESS_OUT_OF_RANGE;
     if (length == 0) return RING_OK;
 
-    if (_device == INTERNAL) {
+    if (_device == RING_EEPROM_INTERNAL) {
 #if defined(ARDUINO_ARCH_AVR) || defined(__AVR__)
         for (uint16_t i = 0; i < length; ++i) destination[i] = EEPROM.read(address + i);
         return RING_OK;
@@ -711,7 +717,7 @@ uint8_t RingEEPROM::writePhysical(uint16_t address, const uint8_t *source, uint1
     if ((uint32_t)address + length > _capacity) return ERR_ADDRESS_OUT_OF_RANGE;
     if (length == 0) return RING_OK;
 
-    if (_device == INTERNAL) {
+    if (_device == RING_EEPROM_INTERNAL) {
 #if defined(ARDUINO_ARCH_AVR) || defined(__AVR__)
         for (uint16_t i = 0; i < length; ++i) EEPROM.update(address + i, source[i]);
         return RING_OK;
