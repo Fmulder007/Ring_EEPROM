@@ -21,6 +21,15 @@ CXX=\${CXX:-g++}
   -o "$BUILD/host_test_internal2"
 "$BUILD/host_test_internal2"
 
+# Exercise the documented alternative CRC polynomials.
+"$CXX" -std=c++11 -Wall -Wextra -Werror \
+  -DARDUINO_ARCH_AVR -DE2END=1023 \
+  -DRING_EEPROM_CRC8_POLY=0xA6 -DRING_EEPROM_CRC16_POLY=0xFDBF \
+  -I"$ROOT/tests/host/include" -I"$ROOT/src" \
+  "$ROOT/src/Ring_EEPROM.cpp" "$ROOT/tests/host/host_test.cpp" \
+  -o "$BUILD/host_test_alt_crc"
+"$BUILD/host_test_alt_crc"
+
 "$CXX" -std=c++11 -Wall -Wextra -Werror \
   -DARDUINO_ARCH_AVR -DE2END=1023 \
   -DRING_EEPROM_SDA=2 -DRING_EEPROM_SCL=3 \
