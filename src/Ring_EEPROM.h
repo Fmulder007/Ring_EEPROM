@@ -39,10 +39,20 @@ enum RingEEPROMResult : uint8_t {
 
 /* Тип памяти, который пользователь выбирает в init(). */
 enum RingEEPROMDevice : uint8_t {
-    INTERNAL = 0,
-    AT24C32  = 1,
-    AT24C64  = 2
+    RING_EEPROM_INTERNAL = 0,
+    AT24C32 = 1,
+    AT24C64 = 2
 };
+
+/*
+   Arduino AVR already defines INTERNAL as the ADC reference selector (usually
+   value 3). Keep that core macro intact. init() accepts both its value and
+   RING_EEPROM_INTERNAL, so Ring_EEPROM does not break analogReference(INTERNAL).
+   On cores without such a macro, expose INTERNAL as our own device selector.
+*/
+#ifndef INTERNAL
+#define INTERNAL RING_EEPROM_INTERNAL
+#endif
 
 /* ============================================================================
    НАСТРОЙКИ ПО УМОЛЧАНИЮ — МОЖНО ПЕРЕОПРЕДЕЛИТЬ ДО #include <Ring_EEPROM.h>
@@ -116,14 +126,14 @@ public:
 
     /* Числовая/скалярная сигнатура копируется внутрь объекта библиотеки. */
     template <typename T>
-    uint8_t init(RingEEPROMDevice device, const T &signature) {
+    uint8_t init(uint8_t device, const T &signature) {
         static_assert(std::is_integral<T>::value || std::is_enum<T>::value,
                       "Ring_EEPROM: scalar signature must be an integer or enum; use a fixed byte/char array for arbitrary signatures");
         return initScalar(device, reinterpret_cast<const uint8_t *>(&signature), sizeof(T), false, 0, 0);
     }
 
     template <typename T>
-    uint8_t init(RingEEPROMDevice device, const T &signature,
+    uint8_t init(uint8_t device, const T &signature,
                  uint16_t startAddress, uint16_t endAddress) {
         static_assert(std::is_integral<T>::value || std::is_enum<T>::value,
                       "Ring_EEPROM: scalar signature must be an integer or enum; use a fixed byte/char array for arbitrary signatures");
@@ -133,13 +143,13 @@ public:
 
     /* Строковый литерал/char-массив: завершающий нулевой байт не входит в подпись. */
     template <size_t N>
-    uint8_t init(RingEEPROMDevice device, const char (&signature)[N]) {
+    uint8_t init(uint8_t device, const char (&signature)[N]) {
         static_assert(N > 1, "Ring_EEPROM: signature string must not be empty");
         return initArray(device, reinterpret_cast<const uint8_t *>(signature), (uint16_t)(N - 1), false, 0, 0);
     }
 
     template <size_t N>
-    uint8_t init(RingEEPROMDevice device, const char (&signature)[N],
+    uint8_t init(uint8_t device, const char (&signature)[N],
                  uint16_t startAddress, uint16_t endAddress) {
         static_assert(N > 1, "Ring_EEPROM: signature string must not be empty");
         return initArray(device, reinterpret_cast<const uint8_t *>(signature), (uint16_t)(N - 1), true,
@@ -148,7 +158,7 @@ public:
 
     /* Любой другой массив фиксированного размера сохраняется целиком. */
     template <typename T, size_t N>
-    uint8_t init(RingEEPROMDevice device, const T (&signature)[N]) {
+    uint8_t init(uint8_t device, const T (&signature)[N]) {
         static_assert(std::is_trivially_copyable<T>::value,
                       "Ring_EEPROM: signature array element type must be trivially copyable");
         static_assert(sizeof(T) * N <= 65535UL, "Ring_EEPROM: signature is too long");
@@ -157,7 +167,7 @@ public:
     }
 
     template <typename T, size_t N>
-    uint8_t init(RingEEPROMDevice device, const T (&signature)[N],
+    uint8_t init(uint8_t device, const T (&signature)[N],
                  uint16_t startAddress, uint16_t endAddress) {
         static_assert(std::is_trivially_copyable<T>::value,
                       "Ring_EEPROM: signature array element type must be trivially copyable");
@@ -168,8 +178,8 @@ public:
 
     /* Вариант для динамически заданной последовательности байтов.
        Память signature должна оставаться доступной до повторного init(). */
-    uint8_t init(RingEEPROMDevice device, const uint8_t *signature, uint16_t signatureLength);
-    uint8_t init(RingEEPROMDevice device, const uint8_t *signature, uint16_t signatureLength,
+    uint8_t init(uint8_t device, const uint8_t *signature, uint16_t signatureLength);
+    uint8_t init(uint8_t device, const uint8_t *signature, uint16_t signatureLength,
                  uint16_t startAddress, uint16_t endAddress);
 
     template <typename T>
@@ -194,11 +204,11 @@ private:
         uint16_t sequence;
     };
 
-    uint8_t initScalar(RingEEPROMDevice device, const uint8_t *signature, uint16_t signatureLength,
+    uint8_t initScalar(uint8_t device, const uint8_t *signature, uint16_t signatureLength,
                        bool hasRange, uint16_t startAddress, uint16_t endAddress);
-    uint8_t initArray(RingEEPROMDevice device, const uint8_t *signature, uint16_t signatureLength,
+    uint8_t initArray(uint8_t device, const uint8_t *signature, uint16_t signatureLength,
                       bool hasRange, uint16_t startAddress, uint16_t endAddress);
-    uint8_t initCommon(RingEEPROMDevice device, const uint8_t *signature, uint16_t signatureLength,
+    uint8_t initCommon(uint8_t device, const uint8_t *signature, uint16_t signatureLength,
                        bool copySignature, bool hasRange, uint16_t startAddress, uint16_t endAddress);
 
     uint8_t readRaw(uint8_t *destination, uint16_t dataLength);
